@@ -327,7 +327,10 @@ class AnnovarParser(object):
             avf.hgvs_base_position = self._unpack_vf_transcript_tuple(transcript_tuple)
             
             if avf.refseq_transcript == None:
-                self.logger.debug("Ignoring transcript. Probably because it was intergenic and didn't have any useful tfx.")
+                self.logger.debug(f"Ignoring transcript {transcript_tuple}. Probably because it was intergenic and didn't have any useful information")
+                continue
+            elif avf.refseq_transcript.startswith("NR"):
+                self.logger.debug("Ignoring non-coding transcript " + avf.refseq_transcript)
                 continue
 
             self.logger.debug(f"Parsed variant_function record with transcript: {avf}")
@@ -473,8 +476,9 @@ class AnnovarParser(object):
                 right1_rec = matching_genotypes[1]
                 right2_rec = matching_genotypes[2]  
 
-                # The two records from annovar.variant_function will label one of the records as exonic and one as splicing   
-                assert left_rec.variant_type == 'exonic' or right1_rec.variant_type == 'exonic' or right2_rec.variant_type == 'exonic', "Transcript has three records none of which are exonic: " + left_rec.get_label()
+                # The two records from annovar.variant_function will label one of the records as exonic and one as splicing
+                if not (left_rec.variant_type == 'exonic' or right1_rec.variant_type == 'exonic' or right2_rec.variant_type == 'exonic'):
+                    raise ValueError("Transcript has three records and none are exonic: " + left_rec.get_label())
                 
                 # If the annovar.exonic_variant_function file says the variant is exonic, but the annovar.variant_function file says the same
                 # transcript is intronic the information we have is contradictory and we skip it.  Example: Annovar says 1-146466030-C-G 
@@ -484,7 +488,8 @@ class AnnovarParser(object):
                     continue
 
                 # The two records from annovar.variant_function will label one of the records as exonic and one as splicing
-                assert left_rec.splicing == 'splicing' or right1_rec.splicing == 'splicing' or right2_rec.splicing == 'splicing', "Transcript has three records none of which are splicing: " + left_rec.get_label()
+                if not (left_rec.splicing == 'splicing' or right1_rec.splicing == 'splicing' or right2_rec.splicing == 'splicing'):
+                    raise ValueError("Transcript has three records and none are are splicing: " + left_rec.get_label())
                 
                 self.logger.debug(f"Merging three records left={left_rec} and right1={right1_rec}, right2={right2_rec}")
                 self._merge(left_rec, right1_rec)
@@ -492,7 +497,7 @@ class AnnovarParser(object):
             else:
                 # Our current workflow only involves two annovar input files and there will only be a maximum of three matching transcripts.
                 # This exception ensures our expectation is true. 
-                raise Exception(f"This transcript has more than 3 annovar records, which is not supported; see code comment. rec={left_rec}")
+                raise ValueError(f"This transcript has more than 3 annovar records, which is not supported: {left_rec}")
             
             annovar_records.append(left_rec)
         

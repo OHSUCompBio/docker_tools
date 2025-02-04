@@ -1,17 +1,19 @@
 import os
 import unittest
 
+from edu.ohsu.compbio.txeff.tx_eff_ccds import TxEffCcds
 from edu.ohsu.compbio.txeff.tx_eff_hgvs import TxEffHgvs
 from edu.ohsu.compbio.txeff.util.tx_eff_pysam import PysamTxEff
 from edu.ohsu.compbio.txeff.variant_transcript import VariantTranscript
 
-
 FILE_HG37_REFERENCE_FASTA = '/opt/bioinformatics/Broad/Homo_sapiens_assembly19.fasta'
+REFSEQ_CCDS_MAP = '../../../../../test-data/refseq_ccds_map.csv'
 
 class TxEffHgvsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls._pysam_file = PysamTxEff(FILE_HG37_REFERENCE_FASTA)
+        cls._pysam = PysamTxEff(FILE_HG37_REFERENCE_FASTA)        
+        cls._tx_eff_ccds = TxEffCcds(REFSEQ_CCDS_MAP)
         
     def setUp(self):
         unittest.TestCase.setUp(self)
@@ -28,11 +30,10 @@ class TxEffHgvsTest(unittest.TestCase):
         hgvs_b = self._create_variant('2', 2, 'A', 'T', 'bbb.1', c_dot='c.1A>T', p_dot_one='p.L1P', p_dot_three='p.Leu1Pro', protein_transcript='NP_001')
         hgvs_c = self._create_variant('3', 3, 'A', 'T', 'ccc.1', c_dot='c.3A>T', p_dot_one='p.L3P', p_dot_three='p.Leu3Pro', protein_transcript='NP_003')
 
-        merged_transcripts, unmerged_transcripts = TxEffHgvs()._merge_annovar_with_hgvs([annovar_a, annovar_b], [hgvs_b,hgvs_c])
+        merged_transcripts, unmerged_transcripts = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map)._merge_annovar_with_hgvs([annovar_a, annovar_b], [hgvs_b,hgvs_c])
         
         self.assertEqual(len(merged_transcripts), 1, 'Only one transcript is common to both lists')
         self.assertEqual(len(unmerged_transcripts), 2, 'Two transcripts are common to both lists')
-        
     
     def test__get_unmatched_annovar_transcripts(self):
         '''
@@ -52,7 +53,7 @@ class TxEffHgvsTest(unittest.TestCase):
         b = {t3.get_label():t3, t4.get_label():t4, t5.get_label():t5, t6.get_label():t6}
         
         # Unmatched will be 1,2,5,6
-        c = TxEffHgvs()._get_unmatched_annovar_transcripts(a,b)
+        c = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map)._get_unmatched_annovar_transcripts(a,b)
         
         self.assertEqual(len(c), 4, 'Symmetric difference') 
         
@@ -75,30 +76,34 @@ class TxEffHgvsTest(unittest.TestCase):
                               self._create_variant('1', 1, 'A', 'T', 'NM_000.3', gene='AAA'),
                               self._create_variant('1', 1, 'A', 'T', 'NM_000.2', gene='AAA', p_dot_one='p.L1P', p_dot_three='p.Leu1Pro', protein_transcript='NP_123.1', variant_effect='Y')]
 
-        best = TxEffHgvs()._get_the_best_transcripts(merged_transcripts)
+        best = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map)._get_the_best_transcripts(merged_transcripts)
         
         self.assertEqual(len(best), 1, 'Only one transcript expected')
         self.assertEqual(best[0].get_label(), '1-1-A-T-NM_000.2', 'Most complete, lastest version')
     
-    def test__get_the_best_transcripts_onlyOnePdot_error(self):
+    def test__get_the_best_transcripts_onlyOnePdot_zeroPoints(self):
         vt = VariantTranscript('1', 123, 'C', 'G')
         vt.hgvs_p_dot_one = 'p.E447del'
         vt.protein_transcript = 'NP_123.1'
+        vt.hgvs_amino_acid_position = 447
         vt.hgvs_p_dot_three = ''        
-        self.assertRaises(ValueError, vt._get_self_score)
+        self.assertEqual(vt._get_self_score(), 0, "Score without p3")
         
+    def test___get_self_score_allProteinFields_onePoint(self):
         vt = VariantTranscript('1', 123, 'C', 'G')
-        vt.hgvs_p_dot_one = 'p.Glu447del'
+        vt.hgvs_p_dot_one = 'p.E447del'
         vt.protein_transcript = 'NP_123.1'
-        vt.hgvs_p_dot_three = ''
-        self.assertRaises(ValueError, vt._get_self_score)        
+        vt.hgvs_p_dot_three = 'p.Glu447del'
+        vt.hgvs_amino_acid_position = 447
+        self.assertEqual(vt._get_self_score(), 1, "Score with all protein fields")
         
-    def test__get_the_best_transcripts_pDotNoProteinTranscript_error(self):
+    def test___get_self_score_pDotNoProteinTranscript_zeroPoints(self):
         vt = VariantTranscript('1', 123, 'C', 'G')
         vt.hgvs_p_dot_one = 'p.E447del'
         vt.hgvs_p_dot_three = 'p.Glu447del'
+        vt.hgvs_amino_acid_position = 447
         vt.protein_transcript = ''                
-        self.assertRaises(ValueError, vt._get_self_score)
+        self.assertEqual(vt._get_self_score(), 0, "Score without protein transcript")
         
     def test__correct_indel_coords(self):
         '''
@@ -107,55 +112,55 @@ class TxEffHgvsTest(unittest.TestCase):
         # Substitution 
         genotype = '1-123-G-A'
         chromosome, position, ref, alt = genotype.split('-')
-        pos_part = TxEffHgvs()._correct_indel_coords(chromosome, int(position), ref, alt, self._pysam_file)
+        pos_part = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map)._correct_indel_coords(chromosome, int(position), ref, alt)
         self.assertEqual(pos_part, '123G>A', "g. is incorrect")
 
         # Insertion 
         genotype = '1-123-G-AC'
         chromosome, position, ref, alt = genotype.split('-')
-        pos_part = TxEffHgvs()._correct_indel_coords(chromosome, int(position), ref, alt, self._pysam_file)
+        pos_part = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map)._correct_indel_coords(chromosome, int(position), ref, alt)
         self.assertEqual(pos_part, '123_124insC', "g. is incorrect")
 
         # Multi-nucleotide insertion
         genotype = '7-33054117-T-TAAGA'
         chromosome, position, ref, alt = genotype.split('-')
-        pos_part = TxEffHgvs()._correct_indel_coords(chromosome, int(position), ref, alt, self._pysam_file)
+        pos_part = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map)._correct_indel_coords(chromosome, int(position), ref, alt)
         self.assertEqual(pos_part, '33054117_33054118insAAGA', "g. is incorrect")
 
         # Deletion
         genotype = '1-123-AC-G'
         chromosome, position, ref, alt = genotype.split('-')
-        pos_part = TxEffHgvs()._correct_indel_coords(chromosome, int(position), ref, alt, self._pysam_file)
+        pos_part = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map)._correct_indel_coords(chromosome, int(position), ref, alt)
         self.assertEqual(pos_part, '124del', "g. is incorrect")
 
         # Multi-nucleotide deletion
         genotype = '9-2039776-ACAG-A'
         chromosome, position, ref, alt = genotype.split('-')
-        pos_part = TxEffHgvs()._correct_indel_coords(chromosome, int(position), ref, alt, self._pysam_file)
+        pos_part = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map)._correct_indel_coords(chromosome, int(position), ref, alt)
         self.assertEqual(pos_part, '2039777_2039779del', "g. is incorrect")
 
         # Duplication
         genotype = '3-142274739-A-AT'
         chromosome, position, ref, alt = genotype.split('-')
-        pos_part = TxEffHgvs()._correct_indel_coords(chromosome, int(position), ref, alt, self._pysam_file)
+        pos_part = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map)._correct_indel_coords(chromosome, int(position), ref, alt)
         self.assertEqual(pos_part, '142274749dup', "g. is incorrect")
 
         # Multi-nucleotide duplication
         genotype = '5-79950724-G-GCCGCAGCGC'
         chromosome, position, ref, alt = genotype.split('-')
-        pos_part = TxEffHgvs()._correct_indel_coords(chromosome, int(position), ref, alt, self._pysam_file)
+        pos_part = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map)._correct_indel_coords(chromosome, int(position), ref, alt)
         self.assertEqual(pos_part, '79950725_79950733dup', "g. is incorrect")
 
         # Indel
         genotype = '5-112175461-CAGTTCACTTGA-CGTC'
         chromosome, position, ref, alt = genotype.split('-')
-        pos_part = TxEffHgvs()._correct_indel_coords(chromosome, int(position), ref, alt, self._pysam_file)
+        pos_part = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map)._correct_indel_coords(chromosome, int(position), ref, alt)
         self.assertEqual(pos_part, '112175462_112175472delinsGTC', "g. is incorrect")
         
         # Repeat
         genotype = '1-153924029-AG-A'
         chromosome, position, ref, alt = genotype.split('-')
-        pos_part = TxEffHgvs()._correct_indel_coords(chromosome, int(position), ref, alt, self._pysam_file)
+        pos_part = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map)._correct_indel_coords(chromosome, int(position), ref, alt)
         self.assertEqual(pos_part, '153924033del', "g. is incorrect")
         
     def _create_variant(self, chromosome, pos, ref, alt, transcript, gene=None, c_dot=None, p_dot_one=None, p_dot_three=None, variant_effect=None, variant_type=None, protein_transcript=None):
@@ -175,56 +180,53 @@ class TxEffHgvsTest(unittest.TestCase):
         return variant_transcript
 
     def test___configure_sequence_source_noParameters_useNcbi(self):
-        tx_eff_hgvs = TxEffHgvs()
-        tx_eff_hgvs._sequence_source = None
+        sequence_source = None
+        tx_eff_hgvs = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map, sequence_source = sequence_source)        
         self.assertEqual(tx_eff_hgvs._configure_sequence_source(), 1, "Return value should indicate NCBI will be used")
     
     def test___configure_sequence_source_requestNcbi_useNcbi(self):
-        tx_eff_hgvs = TxEffHgvs()
-        tx_eff_hgvs._sequence_source = 'ncbi'
+        sequence_source = 'ncbi'
+        tx_eff_hgvs = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map, sequence_source = sequence_source)        
         self.assertEqual(tx_eff_hgvs._configure_sequence_source(), 1, "Return value should indicate NCBI will be used")
         
     def test___configure_sequence_source_invalid_raiseError(self):
-        tx_eff_hgvs = TxEffHgvs()
-        tx_eff_hgvs._sequence_source = 'nonsense'
+        sequence_source = 'nonsense'
+        tx_eff_hgvs = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map, sequence_source = sequence_source)
         self.assertRaises(ValueError,tx_eff_hgvs._configure_sequence_source)
         
     def test___configure_sequence_source_envUrl_urlConfigured(self):
         # URL overrides directory
-        tx_eff_hgvs = TxEffHgvs()
-        tx_eff_hgvs._sequence_source = None
+        tx_eff_hgvs = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map)
         os.environ['HGVS_SEQREPO_URL'] = "http://localhost:5000/seqrepo"
         os.environ['HGVS_SEQREPO_DIR'] = "/path"
         self.assertEqual(tx_eff_hgvs._configure_sequence_source(), 2, "Return value should indicate URL will be used")
         self.assertIsNone(os.environ.get('HGVS_SEQREPO_DIR'), "HGVS_SEQREPO_DIR should be unset")
         
     def test___configure_sequence_source_envDirectory_directoryConfigured(self):
-        tx_eff_hgvs = TxEffHgvs()
-        tx_eff_hgvs._sequence_source = None
+        tx_eff_hgvs = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map)
         os.environ['HGVS_SEQREPO_DIR'] = "/path"
         self.assertEqual(tx_eff_hgvs._configure_sequence_source(), 3, "Return value should indicate URL will be used")
     
     def test___configure_sequence_source_argUrlAndEnvUrl_argUrlConfigured(self):
         # The argument (tx_eff_hgvs._sequence_source) overrides any environment variable
-        tx_eff_hgvs = TxEffHgvs()
         url = "http://host1/seqrepo"
-        tx_eff_hgvs._sequence_source = url
+        tx_eff_hgvs = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map, sequence_source = url)
+        
         os.environ['HGVS_SEQREPO_URL'] = "http://host2/seqrepo"
         self.assertEqual(tx_eff_hgvs._configure_sequence_source(), 4, "Return value should indicate URL will be used")
         self.assertEqual(os.environ.get('HGVS_SEQREPO_URL'), url, "HGVS_SEQREPO_URL should be set to the argument path")
     
     def test___configure_sequence_source_argDirectory_argDirectoryConfigured(self):
-        tx_eff_hgvs = TxEffHgvs()
-        tx_eff_hgvs._sequence_source = "/path"
+        tx_eff_hgvs = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds.refseq_to_ccds_map, sequence_source = "/path0")
+        
         os.environ['HGVS_SEQREPO_URL'] = "http://host/seqrepo"
         self.assertEqual(tx_eff_hgvs._configure_sequence_source(), 5, "Return value should indicate file repository will be used")
         self.assertIsNone(os.environ.get('HGVS_SEQREPO_URL'), "HGVS_SEQREPO_URL should be unset")
             
     def test___configure_sequence_source_argDirectoryAndEnvDirectory_argDirectoryConfigured(self):
         # The argument (tx_eff_hgvs._sequence_source) overrides any environment variable
-        tx_eff_hgvs = TxEffHgvs()
         path = "/path0"
-        tx_eff_hgvs._sequence_source = path
+        tx_eff_hgvs = TxEffHgvs(pysam = self._pysam, refseq_ccds_map = self._tx_eff_ccds, sequence_source = path)
         os.environ['HGVS_SEQREPO_DIR'] = "/path1"
         os.environ['HGVS_SEQREPO_URL'] = "http://host/seqrepo"
         self.assertEqual(tx_eff_hgvs._configure_sequence_source(), 5, "Return value should indicate file repository will be used")

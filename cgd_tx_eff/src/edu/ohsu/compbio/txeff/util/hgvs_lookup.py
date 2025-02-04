@@ -7,11 +7,13 @@ Created on Mar. 21, 2023
 @author: pleyte
 '''
 from argparse import ArgumentParser
+import argparse
 import logging.config
 import os
 
 import hgvs.dataproviders.uta
 
+from edu.ohsu.compbio.txeff.tx_eff_ccds import TxEffCcds
 from edu.ohsu.compbio.txeff.tx_eff_hgvs import TxEffHgvs
 from edu.ohsu.compbio.txeff.util.tfx_log_config import TfxLogConfig
 from edu.ohsu.compbio.txeff.util.tx_eff_pysam import PysamTxEff
@@ -34,7 +36,7 @@ class HgvsLookup(object):
         else:
             logging.info(f"Using UTA Database at {os.environ.get('UTA_DB_URL')}")
 
-    def find_genotype(self, genotype: str, reference_fasta):
+    def find_genotype(self, genotype: str, reference_fasta, refseq_ccds_file):
         '''
         Search UTA for transcripts associated with the genotype (e.g. 7-12345-C-G)
         '''
@@ -42,10 +44,13 @@ class HgvsLookup(object):
         variant = VariantTranscript(chromosome, position, ref, alt)
 
         # Reference file   
-        pysam_file = PysamTxEff(reference_fasta)
+        pysam = PysamTxEff(reference_fasta)
         
-        with TxEffHgvs() as tx_eff_hgvs:
-            transcripts = tx_eff_hgvs._lookup_hgvs_transcripts([variant], pysam_file)
+        # Load the refseq to ccds mappings
+        tx_eff_ccds = TxEffCcds(refseq_ccds_file)
+
+        with TxEffHgvs(pysam = pysam, refseq_ccds_map = tx_eff_ccds.refseq_to_ccds_map) as tx_eff_hgvs:
+            transcripts = tx_eff_hgvs._lookup_hgvs_transcripts([variant])
 
         logging.info(f"Found {len(transcripts)} transcripts associated with {genotype}")
         
@@ -75,13 +80,17 @@ if __name__ == '__main__':
     parser.add_argument('--reference_fasta',
                         help='Reference genome, in FASTA format.  The associated index is expected to be in the same directory.',
                         required=True)
+    parser.add_argument('-c', '--ccds_map', 
+                help='Input CSV or GFF with Annovar-to-CCDS mappings.', 
+                type=argparse.FileType('r'), 
+                required=True)    
     
     args = parser.parse_args()
     
     hgvs_lookup = HgvsLookup()
     
     if args.variant_genotype is not None:
-        hgvs_lookup.find_genotype(args.variant_genotype, args.reference_fasta)
+        hgvs_lookup.find_genotype(args.variant_genotype, args.reference_fasta, args.ccds_map.name)
     elif args.gene is not None:
         hgvs_lookup.find_gene(args.gene)
     else:

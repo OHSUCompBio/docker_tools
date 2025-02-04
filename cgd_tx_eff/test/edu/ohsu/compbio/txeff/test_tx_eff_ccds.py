@@ -1,45 +1,15 @@
 import unittest
 from edu.ohsu.compbio.txeff.tx_eff_ccds import TxEffCcds
-from edu.ohsu.compbio.txeff.variant_transcript import VariantTranscript
+
+REFSEQ_CCDS_MAP = '../../../../../test-data/refseq_ccds_map.csv'
 
 class TxEffCcdsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tx_eff_ccds = TxEffCcds(None)
+        cls._tx_eff_ccds = TxEffCcds(REFSEQ_CCDS_MAP)
 
-    def test__get_preferred_refseq_transcript_different_accesion(self):
-        vt0 = VariantTranscript('1', 123, 'C', 'G')
-        vt0.refseq_transcript = 'NM_000051.4'
-
-        vt1 = VariantTranscript('1', 123, 'C', 'G')
-        vt1.refseq_transcript = 'NM_001351834.2'
-
-        preferred = self.tx_eff_ccds._get_preferred_refseq_transcript(vt0, vt1)
-        self.assertEqual(preferred.refseq_transcript, 'NM_000051.4', "Earliest accession should be preferred")
-        
-        # Switch the order of the inputs and make sure we get the same result
-        preferred = self.tx_eff_ccds._get_preferred_refseq_transcript(vt1, vt0)
-        self.assertEqual(preferred.refseq_transcript, 'NM_000051.4', "Earliest accession should be preferred")
-
-    def test__get_preferred_refseq_transcript_different_version(self):
-        vt0 = VariantTranscript('1', 123, 'C', 'G')
-        vt0.refseq_transcript = 'NM_000051.4'
-
-        vt1 = VariantTranscript('1', 123, 'C', 'G')
-        vt1.refseq_transcript = 'NM_000051.5'
-        preferred = self.tx_eff_ccds._get_preferred_refseq_transcript(vt0, vt1)
-
-        self.assertEqual(preferred.refseq_transcript, 'NM_000051.5', "Latest version should be preferred")
-        
-        # Switch the order of the inputs and make sure we get the same result
-        preferred = self.tx_eff_ccds._get_preferred_refseq_transcript(vt1, vt0)
-        self.assertEqual(preferred.refseq_transcript, 'NM_000051.5', "Latest version should be preferred")
-        
-    def test__get_preferred_refseq_transcript_non_refseq(self):
-        vt0 = VariantTranscript('1', 123, 'C', 'G')
-        vt0.refseq_transcript = 'NP_000000.0'
-
-        vt1 = VariantTranscript('1', 123, 'C', 'G')
-        vt1.refseq_transcript = 'NM_000051.5'
-
-        self.assertRaises(ValueError, self.tx_eff_ccds._get_preferred_refseq_transcript, vt0, vt1)
+    def test__read_mappings(self):
+        self.assertIsNotNone(self._tx_eff_ccds.refseq_to_ccds_map, "dict created")
+    
+    def test_refseq_to_ccds_map(self):
+        self.assertEqual(self._tx_eff_ccds.refseq_to_ccds_map.get('NM_014246.4'), 'CCDS14076.1', 'mapping found')

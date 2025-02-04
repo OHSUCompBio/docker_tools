@@ -6,12 +6,11 @@ Created on Apr 20, 2022
 @author: pleyte
 '''
 
-from collections import defaultdict
+from collections import defaultdict, Counter
 import csv
 import itertools
 import logging
 from multiprocessing.dummy import Pool as ThreadPool
-
 import os
 from pathlib import Path
 import re
@@ -94,15 +93,19 @@ class TxEffHgvs(object):
     """
     Finds transcripts associated with variant. Makes use of the SeqRepo and UTA datasources. 
     Benchmarking can be enabled to produce a csv file that shows how long SeqRepo and UTA queries are taking.
-    pysam_file is an instance of PysamTxEff 
+    pysam is an instance of PysamTxEff
+    refseq_ccds_map is the dict created by TxEffCcds
     """ 
-    def __init__(self, pysam_file, sequence_source = None, threads = 1, benchmark = False):
+    def __init__(self, pysam, refseq_ccds_map, sequence_source = None, threads = 1, benchmark = False):
         self.logger = logging.getLogger(__name__)
-        self.pysam_file = pysam_file
+        self._pysam = pysam
         self._sequence_source = sequence_source
         self._benchmarking = None
         self._variant_counter = 0
-
+        
+        self._ccds_map_counter = Counter()
+        self._refseq_ccds_map = refseq_ccds_map
+        
         # Fields related to threaded processing
         self._lock = threading.Lock()
         self._threads = threads
@@ -252,7 +255,7 @@ class TxEffHgvs(object):
             new_pos = str(pos) + change
             return new_pos
         elif lalt == 1 and lref > lalt:
-            dels = RptHandler(self.pysam_file, chrom, pos, ref)
+            dels = RptHandler(self._pysam, chrom, pos, ref)
             # Deletion case
             if dels.check_rpt_status():
                 new_start, new_end = dels.find_rpt_coords()
@@ -270,7 +273,7 @@ class TxEffHgvs(object):
                     new_pos = '_'.join([new_start, new_end]) + 'del'
             return new_pos
         elif lref == 1 and lalt > lref:
-            dups = RptHandler(self.pysam_file, chrom, pos, alt)
+            dups = RptHandler(self._pysam, chrom, pos, alt)
             # Duplication case
             if dups.check_rpt_status():
                 new_start, new_end = dups.find_rpt_coords()
@@ -313,7 +316,7 @@ class TxEffHgvs(object):
         pool = ThreadPool(processes = self._threads)
         
         # One thread per variant 
-        results = pool.map(self._lookup_variant_hgvs_transcripts, variants)        
+        results = pool.map(self._lookup_variant_hgvs_transcripts, variants)
         
         pool.close()
         pool.join()
@@ -540,9 +543,7 @@ class TxEffHgvs(object):
             else:
                 self.logger.debug(f"Merging HGVS transcript with Annovar transcript having key {transcript_key}")
                 merged_transcripts.append(self._merge(transcript_key, hgvs_transcript, annovar_match))
-    
-        # Not all the Annovar transcripts will get matched and merged with an HGVS transcript. They will likely be discarded
-        # when _get_the_best_transcripts is called but we want one version of every known transcript so we need to keep the unmerged ones.  
+      
         unmerged_transcripts = self._get_unmatched_annovar_transcripts(annovar_dict, hgvs_dict)
     
         return merged_transcripts, unmerged_transcripts
@@ -679,7 +680,7 @@ class TxEffHgvs(object):
         else:
             return True
     
-    def get_summary(self, annovar_transcripts: list, annovar_variants: set, hgvs_transcripts: list, merged_transcripts: list, best_transcripts: list):
+    def get_summary(self, annovar_transcripts: list, annovar_variants: set, hgvs_transcripts: list, merged_transcripts: list, refseq_transcripts: list, ccds_transcripts: list):
         '''
         Return a collection of summary statistics after processing completes. 
         '''
@@ -687,7 +688,8 @@ class TxEffHgvs(object):
         results['annovar_transcript_count'] = len(annovar_transcripts)
         results['annovar_distinct_variant_count'] = len(annovar_variants)
         results['hgvs_transcript_count'] = len(hgvs_transcripts)
-        results['best_transcripts'] = len(best_transcripts)
+        results['refseq_transcripts'] = len(refseq_transcripts)
+        results['ccds_transcripts'] = len(ccds_transcripts)
         
         results['hgvs_distinct_variant_count'] = len(set(map(lambda x: Variant(x.chromosome, x.position, x.reference, x.alt), hgvs_transcripts)))
         
@@ -739,8 +741,7 @@ class TxEffHgvs(object):
         results['unmatched_annovar_transcript_count'] = unmatched_annovar_transcript_count
         results['unmatched_hgvs_transcript_count'] = unmatched_hgvs_transcript_count    
         results['merged_transcript_count'] = len(merged_transcripts)
-        
-        
+                
         merged_distinct_variant_count = len(set(map(lambda x: Variant(x.chromosome, x.position, x.reference, x.alt), merged_transcripts)))
         results['merged_distinct_variant_count'] = merged_distinct_variant_count 
         
@@ -749,12 +750,9 @@ class TxEffHgvs(object):
         if not sanity_check_hgvs:
             self.logger.debug(f"Failed sanity check 'sanity_check_hgvs': {len(hgvs_transcripts)} - {unmatched_hgvs_transcript_count} != {matched_annovar_and_hgvs_transcript_count}")
         
-        # These sanity checks have not been maintained. The should probably be deleted and replaced with unit tests.  
-        
         # Sanity check: The number of annovar transcripts minus the count of merged annovar transcripts is equal to the number of 
         # merged HGVS and annovar transcripts.
         sanity_check_annovar = (len(annovar_transcripts) - unmatched_annovar_transcript_count) == matched_annovar_and_hgvs_transcript_count    
-
         if not sanity_check_annovar:
             self.logger.debug(f"Failed Annovar sanity check: {len(annovar_transcripts)} - {unmatched_annovar_transcript_count} != {matched_annovar_and_hgvs_transcript_count}")
     
@@ -762,7 +760,13 @@ class TxEffHgvs(object):
         if not sanity_check_hgvs or not sanity_check_annovar:
             self.logger.info(f'Failed sanity check: Total number of transcripts does not equal sum of matched, and unmatched ({sanity_check_hgvs} and {sanity_check_annovar}).')
 
-        sanity_check = sanity_check_hgvs and sanity_check_annovar
+        # The number of refseq transcripts that are mapped to a ccds: either the best refseq was able to be mapped or one of the alternatives was able to be mapped.  
+        sanity_check_ccds_a = len(ccds_transcripts) == self._ccds_map_counter['ccds_mapped_to_best_refseq'] + self._ccds_map_counter['other_accession_version_mapped']
+        
+        # The number of refseq transcripts that couldn't be mapped to a ccds: the no alternatives to consider or the alternatives couldn't be mapped. 
+        sanity_check_ccds_b = len(refseq_transcripts) - len(ccds_transcripts) == self._ccds_map_counter['other_accession_version_not_mapped'] + self._ccds_map_counter['no_alternatives_to_consider']
+        
+        sanity_check = sanity_check_hgvs and sanity_check_annovar and sanity_check_ccds_a and sanity_check_ccds_b
         results['sanity_check'] = sanity_check
     
         return results
@@ -780,7 +784,9 @@ class TxEffHgvs(object):
         self.logger.info(f"Number of Annovar transcripts not matched with HGVS transcripts: {results['unmatched_annovar_transcript_count']}")
         self.logger.info(f"Number of HGVS transcripts not matched with Annovar transcripts: {results['unmatched_hgvs_transcript_count']}")
         self.logger.info(f"Number of distinct variants in merged transcript list: {results['merged_distinct_variant_count']}")
-        self.logger.info(f"Number of best transcripts in final list: {results['best_transcripts']}")
+        self.logger.info(f"Number of RefSeq transcripts: {results['refseq_transcripts']}")
+        self.logger.info(f"Number of CCDS transcripts: {results['ccds_transcripts']}")
+        self.logger.info(f"Results of mapping CCDS: {self._ccds_map_counter}")
         self.logger.info(f"Sanity check: {'Passed' if results['sanity_check'] else 'Failed' }")
         
     def get_updated_hgvs_transcripts(self, annovar_transcripts: list):
@@ -803,58 +809,128 @@ class TxEffHgvs(object):
     
         all_transcripts = merged_transcripts + unmerged_transcripts
         
-        # Because we have two sources of transcripts (annovar and hgvs/uta) we may have more than one version of a transcript but we only want one
-        # version of each transcript.
-        best_transcripts = self._get_the_best_transcripts(all_transcripts)
-        
+        # When there are multiple versions of a transcript (eg NM_123.1 and NM_123.3) we pick the one that has the most information.
+        # We also create copies of refseq transcripts that can be mapped to CCDS accessions.  
+        refseq_transcripts, ccds_transcripts = self._get_the_best_refseq_transcripts_and_make_ccds_copies(all_transcripts)
+
         self._log_summary(self.get_summary(annovar_transcripts, 
-                                 disinct_variants, 
-                                 hgvs_transcripts, 
-                                 merged_transcripts,
-                                 best_transcripts))
-    
+                                           disinct_variants, 
+                                           hgvs_transcripts, 
+                                           merged_transcripts,
+                                           refseq_transcripts,
+                                           ccds_transcripts))
         
-        return best_transcripts
+        return refseq_transcripts + ccds_transcripts
             
     def __get_variant_transcript_key(self, transcript: VariantTranscript):
         '''
-        This function returns a unique key that is used for a dict in the _get_the_best_transcripts function.
-        The key looks like '7-12345-C-G-NM_123' (the transcript's version is not included) 
+        Generate a key made up of variant and transcript accession w/o version (eg '7-12345-C-G-NM_123'). 
         '''
         # Take the version off of the transcript
         unversioned_transcript = transcript.refseq_transcript.split('.')[0]
         return f"{transcript.chromosome}-{transcript.position}-{transcript.reference}-{transcript.alt}-{unversioned_transcript}"
-            
-    def _get_the_best_transcripts(self, transcripts: list):
+    
+    def _get_the_best_refseq_transcripts_and_make_ccds_copies(self, transcripts: list):
         '''
-        When there is more than one version of a transcript this method picks the best one so that we only end up with one version of each. 
-        The best transcript will be the one with the most information (ie the least sparse). When there is a tie, the transcript with the most 
-        recent version is selected.
+        This function accomplishes two goals:
+        1) Only have one version of each refseq accession. When there is more than one version of a transcript with RefSeq accession pick the best one. For example if we have VariantTranscripts with 
+            accessions NM_123.1 and NM_123.3 and NM_123.1 has combined information from annovar and hgvs/uta but NM_123.3 only has information from 
+            annovar then NM_123.3 will be discarded. 
+        2) Create CCDS copies of each RefSeq variant transcript. For each of the transcripts that will be returned we check to see if its refseq accession can be mapped to a CCDS accession. When it can be, 
+            we create a copy of the VariantTranscript and change the accession to CCDS. 
+                    
+        When the best transcript from goal (1) doesn't map to a CCDS accession but one of the other versions of that refseq accession does, then we look at those discarded transcripts and see if one of them maps to a CCDS. 
+        
+        Example: Variant 22-46929555-C-T
+            - Hgvs/uta finds transcripts NM_014246.4, NM_014246.3, and NM_014246.1; while Annovar only finds NM_014246.3
+            - The best transcript is the one with the most information: NM_014246.3. 
+            - But NM_014246.3 doesn't map to a CCDS. 
+            - NM_014246.4 and NM_014246.1 both map to a CCDS. 
+            - So we create a copy of the variant transcript having accession NM_014246.4, and change it to CCDS14076.1. 
+            - Then this function returns NM_014246.3 and CCDS14076.1
         '''
         # Create a dict where the key is the variant genotype and the unversioned transcript; and the value is a list 
         # of all the transcripts with that prefix that are associated with that genotype.
         # Example: 
-        #    1-1-A-C-NM_001 --> [ NM_001.1, NM001.2]
+        #    transcript_dict['1-123-A-C-NM_001] = [NM_001.1, NM001.2]
         transcript_dict = defaultdict(list)
         for transcript in transcripts:        
             transcript_dict[self.__get_variant_transcript_key(transcript)].append(transcript)
+
+        # Select the best refseq trasncript where best is determined by which one has the most fields populated. 
+        refseq_transcripts = []
+        ccds_transcripts = []
         
-        # Send each list of transcripts, that are grouped by genotype and transcript, to a function that returns the best one 
-        best_transcripts = []
         for key in transcript_dict:
-            best_transcript = self.__get_best_transcript(transcript_dict[key])
-            
+            best_transcript = self._get_best_transcript(transcript_dict[key])
+
             # Annovar doesn't provide a gene for introns and UTR so when that happens lookup the transcript in UTA to see if we can get a gene for it.    
             if not best_transcript.hgnc_gene:
                 best_transcript.hgnc_gene = self._get_gene_for_transcript(best_transcript.refseq_transcript)
-                if best_transcript.hgnc_gene is not None:
+                if best_transcript.hgnc_gene:
                     self.logger.debug(f"Found gene for transcript {best_transcript}: {best_transcript.hgnc_gene}")
+            
+            refseq_transcripts.append(best_transcript)
+            
+            # Find a CCDS transcript equivalent to the refseq      
+            ccds_transcript = self._get_ccds_transcript(best_transcript, transcript_dict[key])
+            if ccds_transcript:
+                ccds_transcripts.append(ccds_transcript)
 
-            best_transcripts.append(best_transcript)
+        return refseq_transcripts, ccds_transcripts
+
+    def _get_ccds_transcript(self, best_transcript, transcripts: list):        
+        """
+        Return a transcript with CCDS accession that corresponds to the transcript parameters which all have the same RefSeq accessions, but different versions. 
+        The ``best_transcript`` parameter is a variant transcript with refseq accession. Ideally we find a ccds mapped to it. 
+        The ``transcripts`` parameter is a list of refseq transcripts with the same accession but different versions (eg NM_123.1 and NM_123.3).  
+            If there isn't a CCDS that maps to the ``best_transcript``, then this function looks for CCDS that are mapped to one of the ones in the list of ``transcripts``.  
+        """
+        ccds_accession = self._refseq_ccds_map.get(best_transcript.refseq_transcript)
+
+        # If the transcript maps to a ccds then make a copy of the transcript, swapping out the refseq accession for the ccds 
+        if ccds_accession:
+            self._ccds_map_counter['ccds_mapped_to_best_refseq'] += 1
+            return self._get_ccds_copy_from_refseq(ccds_accession, best_transcript)
         
-        return best_transcripts    
+        if len(transcripts) == 1:
+            self._ccds_map_counter['no_alternatives_to_consider'] += 1
+            return None
         
-    def __get_best_transcript(self, transcripts: list):
+        # Since a ccds accession for the best_transcript was not found, we look for a mapping using the other versions of this transcript
+        refseqs_that_map_to_ccds = []
+        for x in transcripts:
+            # Skip the refseq transcript we already checked
+            if x == best_transcript:
+                continue
+            
+            # See if this refseq maps to a ccds accession and add it to our list if it does
+            ccds_accession = self._refseq_ccds_map.get(x.refseq_transcript)
+            if ccds_accession:
+                refseqs_that_map_to_ccds.append(x)
+            
+        if not refseqs_that_map_to_ccds:
+            self._ccds_map_counter['other_accession_version_not_mapped'] += 1
+            return None
+        
+        # From the list of refseq transcripts in refseqs_that_map_to_ccds choose one
+        best_alternative = self._get_best_transcript(refseqs_that_map_to_ccds)
+        
+        ccds_accession = self._refseq_ccds_map.get(best_alternative.refseq_transcript)
+
+        self._ccds_map_counter['other_accession_version_mapped'] += 1
+
+        return self._get_ccds_copy_from_refseq(ccds_accession, best_alternative)
+
+    def _get_ccds_copy_from_refseq(self, ccds_accession, refseq_transcript):
+        """
+        Take a RefSeq transcript, make a copy, and change the accession from a RefSeq to a CCDS.
+        """
+        ccds_transcript = refseq_transcript.get_copy()
+        ccds_transcript.refseq_transcript = ccds_accession
+        return ccds_transcript
+        
+    def _get_best_transcript(self, transcripts: list):
         '''
         Take a list of transcripts and return the one that has the most fields filled in. If there is a tie, return the one with the latest version.     
         '''

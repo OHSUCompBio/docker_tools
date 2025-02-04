@@ -1,3 +1,5 @@
+import re
+
 from edu.ohsu.compbio.annovar.annovar_parser import AnnovarVariantFunction
 
 class VariantTranscript(AnnovarVariantFunction):
@@ -20,7 +22,7 @@ class VariantTranscript(AnnovarVariantFunction):
     def __eq__(self, obj):
         if obj is None:
             return False
-        elif super.__eq__(self,obj):
+        elif super().__eq__(obj):
             return self.protein_transcript == obj.protein_transcript
         else:           
             return False
@@ -65,30 +67,47 @@ class VariantTranscript(AnnovarVariantFunction):
         '''
         The overloaded ``__lt__`` function is used to compare variant transcripts. 
         
-        Variants that have different genotypes are compared by concatenating several fields together and comparing the strings. 
+        Variants that have different genotypes are compared by concatenating several fields together and comparing the strings.
         Variants that have the same genotype and transcript are compared by counting how many non-null fields they have (see _get_self_score()).
-            - When scores are the same then transcript version is compared.   
+            - When scores are the same then transcript accession and version are compared.
         '''
-        self_genotype = f'{self.chromosome}-{str(self.position)}-{self.reference}-{self.alt}'
-        self_accession, self_transcript_version = self.refseq_transcript.split('.')
+        # Break down the transcript accessions          
+        p = re.compile("(NM_|CCDS)(\d+)\.(\d+)")
         
-        other_genotype = f'{other.chromosome}-{str(other.position)}-{other.reference}-{other.alt}'
-        other_accession, other_transcript_version = other.refseq_transcript.split('.')
+        self_genotype = f'{self.chromosome}-{self.position}-{self.reference}-{self.alt}'
+        self_result = p.search(self.refseq_transcript)
+        self_transcript_type = self_result.group(1)
+        self_accession = int(self_result.group(2))
+        self_version = int(self_result.group(3))
+
+        other_genotype = f'{other.chromosome}-{other.position}-{other.reference}-{other.alt}'
+        other_result = p.search(other.refseq_transcript)
+        other_transcript_type = other_result.group(1)
+        other_accession = int(other_result.group(2))
+        other_version = int(other_result.group(3))
         
-        # If these are not the same genotype then compare alphabetically using the most important fields 
-        if self_genotype != other_genotype or self_accession != other_accession:
+        # Scoring is not meant to be used for comparing transcripts of different genotypes. If the variants are different or the 
+        #transcripts are of different type (refseq and ccds) then comparison is presumably for the purpose of sorting rather ranking, 
+        # so we compare the string values rather than scores. 
+        if self_genotype != other_genotype or self_transcript_type != other_transcript_type:
             left = f"{self_genotype} {self.refseq_transcript} {self.hgvs_c_dot} {self.protein_transcript} {self.hgvs_p_dot_three}"
             right = f"{other_genotype} {other.refseq_transcript} {other.hgvs_c_dot} {other.protein_transcript} {other.hgvs_p_dot_three}"
             return left < right 
-        
+
+        # Return comparison based on score        
         self_score = self._get_self_score()
         other_score = other._get_self_score()
         
         if self_score != other_score:
             return self_score < other_score
-        
-        # If scores are the same then the comparison is made between transcript versions (since we know the accessions match)
-        return int(self_transcript_version) < int(other_transcript_version)
+
+        # If the accessions are the same but with different versions then choose the one with the latest version.
+        if self_accession == other_accession:
+            return self_version < other_version
+                
+        # If the accessions are different then the older accession is better because it is assumed to be the most curated, so
+        # the lower accession number has higher rank. 
+        return self_accession > other_accession
         
     def _get_self_score(self):
         '''
